@@ -7,6 +7,12 @@ using Microsoft.ApplicationInsights;
 using System.Net.Http;
 using System.IO;
 using System.Threading;
+using System.Diagnostics;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using Newtonsoft.Json.Linq;
+using System.Net;
+using Microsoft.ApplicationInsights.DependencyCollector;
 
 namespace consoleApp {
     class Program {
@@ -63,7 +69,7 @@ namespace consoleApp {
                 printConsole("Tracking Metric", client);
                 client.TrackMetric("Milliseconds", DateTime.Now.Ticks);
                 printConsole("Tracking noOp() method", client);
-                noOp(client);
+                run_python_cmd(client);
                 Console.WriteLine($"-------------- {i+1} of {numLoops} ----------------");
             }
 
@@ -86,6 +92,58 @@ namespace consoleApp {
 
         }
 
+        //Run a Python script
+        private static void run_python_cmd(TelemetryClient client) {
+            client.TrackPageView("run_python_cmd");
+
+            var startTime = DateTime.UtcNow;
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            try {
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = "python.exe";
+                start.Arguments = string.Format("worldTimeAPI.py");
+                start.UseShellExecute = false;
+                start.RedirectStandardOutput = true;
+                using (Process process = Process.Start(start)) {
+                    using (StreamReader reader = process.StandardOutput) {
+                        string result = reader.ReadToEnd();
+                        Console.Write(result);
+                        Call_REST_API(client, result);
+                    }
+                }
+            }
+            finally {
+                timer.Stop();
+                client.TrackDependency("python","worldTimeAPI", "REST API", startTime, timer.Elapsed, true);
+            }
+
+        }
+
+        //Call a REST API and get some data
+        private static async void Call_REST_API(TelemetryClient client, string url) {
+            client.TrackPageView("Call_REST_API");
+            string responseText = "";
+            var jObject = JObject.Parse(url);
+
+            var startTime = DateTime.UtcNow;
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            try {
+
+                using (var httpClient = new HttpClient()) {
+                    var result = await httpClient.GetAsync(jObject["Tz"].ToString());
+                    responseText = await result.Content.ReadAsStringAsync();
+                }
+
+                var JsonResponse = JObject.Parse(responseText);
+                var msg = $"Local time in {jObject["City"].ToString()} is {JsonResponse["utc_datetime"].ToString()}";
+                Console.Write(msg);
+            }
+            finally {
+                timer.Stop();
+                client.TrackDependency("HttpClient", "web-request", jObject["Tz"].ToString(), startTime, timer.Elapsed, true);
+            }
+        }
+
         private static void callIfEven(TelemetryClient client, int numLoops) {
             client.TrackPageView("callIfEven");
             Thread.Sleep(numLoops*5);
@@ -101,6 +159,19 @@ namespace consoleApp {
             Console.WriteLine(stringToPrint);
         }
 
+        static DependencyTrackingTelemetryModule InitializeDependencyTracking(TelemetryConfiguration configuration) {
+            var module = new DependencyTrackingTelemetryModule();
+
+            module.ExcludeComponentCorrelationHttpHeadersOnDomains.Add("localhost");
+            module.ExcludeComponentCorrelationHttpHeadersOnDomains.Add("127.0.0.1");
+            module.IncludeDiagnosticSourceActivities.Add("Microsoft.Azure.ServiceBus");
+            module.IncludeDiagnosticSourceActivities.Add("Microsoft.Azure.EventHubs");
+
+            // initialize the module
+            module.Initialize(configuration);
+
+            return module;
+        }
         #region deprecated
         /*
                 static void Main(string[] args) {
@@ -165,10 +236,12 @@ namespace consoleApp {
             // Add Application Insights
             var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
             telemetryConfiguration.InstrumentationKey = intrumentationKey;
+            telemetryConfiguration.TelemetryInitializers.Add(new HttpDependenciesParsingTelemetryInitializer());
             var telemetryClient = new TelemetryClient(telemetryConfiguration);
             serviceCollection.AddSingleton(telemetryClient);
         }
 
+        
 
     }
 }
